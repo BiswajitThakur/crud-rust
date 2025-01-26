@@ -1,44 +1,49 @@
-use std::str::FromStr;
+use std::net::Ipv6Addr;
 
-/*
-use actix_web::{get, web, App, HttpServer};
+use actix_web::{web, App, HttpServer};
+use crud_rust::{app_config, env_config, model};
 
-struct AppState {
-    app_name: String,
-}
+use mongodb::{
+    bson::doc,
+    options::{ClientOptions, IndexOptions, ServerApi, ServerApiVersion},
+    Client, Database, IndexModel,
+};
 
-#[get("/")]
-async fn index(data: web::Data<AppState>) -> String {
-    format!("Hello {}", &data.app_name)
-}
+const ENV_PATH: &str = ".env_dev";
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| {
+#[tokio::main]
+async fn main() -> mongodb::error::Result<()> {
+    env_config::config(ENV_PATH)?;
+    let db = init_db().await;
+    let collection = db.collection::<model::User>(&std::env::var("COLL_NAME").unwrap());
+    HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(AppState {
-                app_name: "My App".to_string(),
-            }))
-            .service(index)
+            .app_data(web::Data::new(collection.clone()))
+            .service(web::scope("/user").configure(app_config::config_user))
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind((Ipv6Addr::LOCALHOST, 8080))?
     .run()
-    .await
+    .await?;
+    Ok(())
 }
-*/
-use crud_rust::DataBase;
-use uuid::Uuid;
 
-fn main() {
-    let dbs = DataBase::open("/home/eagle/development/crud-rust/database/dbs.sqlite").unwrap();
-    for (index, user) in dbs.iter_users().enumerate() {
-        println!("{}: {}", index, user);
-    }
-    let id = Uuid::from_str("9ed710e5-7e0e-406e-b57a-c9297531cd07").unwrap();
-    if let Some(user) = dbs.find_by_id(id).unwrap() {
-        println!("User found: {:?}", user);
-    }
-    if let Some(user) = dbs.find_by_email("bt@gmail.com").unwrap() {
-        println!("User found: {:?}", user);
-    }
+async fn init_db() -> Database {
+    let uri = std::env::var("DATABASE_URL").unwrap();
+    let database = std::env::var("DATABASE_NAME").unwrap();
+    let coll = std::env::var("COLL_NAME").unwrap();
+
+    let mut client_options = ClientOptions::parse(uri).await.unwrap();
+    let server_api = ServerApi::builder().version(ServerApiVersion::V1).build();
+    client_options.server_api = Some(server_api);
+    let client = Client::with_options(client_options).unwrap();
+    let db = client.database(&database);
+    // Ensure a unique index on the email field
+    let collection = db.collection::<model::User>(&coll);
+    let index_model = IndexModel::builder()
+        .keys(doc! { "email": 1 }) // Create an ascending index on email
+        .options(IndexOptions::builder().unique(true).build())
+        .build();
+
+    collection.create_index(index_model).await.unwrap();
+    db
 }
