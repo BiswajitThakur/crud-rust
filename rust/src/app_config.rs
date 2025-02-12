@@ -1,25 +1,33 @@
+use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::{web, HttpResponse, Responder};
 use mongodb::{
-    bson::{doc, oid::ObjectId, Bson, Document},
+    bson::{doc, oid::ObjectId},
     Collection,
 };
 use serde::Serialize;
 
-use crate::model::{CreateUser, User};
+use crate::{
+    model::{CreateUser, User},
+    password::Password,
+};
 
 pub fn config_user(cfg: &mut web::ServiceConfig) {
-    cfg.service(web::resource("/create").route(web::post().to(create_user)))
+    let rate_limit_config = GovernorConfigBuilder::default()
+        .seconds_per_request(60)
+        .burst_size(3)
+        .finish()
+        .unwrap();
+
+    cfg.route("/id/{id}", web::get().to(get_user_by_id))
+        .route("/email/{email}", web::get().to(get_user_by_email))
         .service(
-            web::resource("/id/{id}")
-                .route(web::get().to(get_user_by_id))
-                .route(web::delete().to(delete_user_by_id))
-                .route(web::put().to(update_user_by_id)),
-        )
-        .service(
-            web::resource("/email/{email}")
-                .route(web::get().to(get_user_by_email))
-                .route(web::delete().to(delete_user_by_email))
-                .route(web::put().to(update_user_by_email)),
+            web::scope("")
+                .wrap(Governor::new(&rate_limit_config))
+                .route("/create", web::post().to(create_user))
+                .route("/id/{id}", web::delete().to(delete_user_by_id))
+                .route("/id/{id}", web::put().to(update_user_by_id))
+                .route("/email/{email}", web::delete().to(delete_user_by_email))
+                .route("/email/{email}", web::put().to(update_user_by_email)),
         );
 }
 
@@ -31,8 +39,10 @@ struct MyError {
 async fn create_user(
     user: web::Json<CreateUser>,
     collection: web::Data<Collection<User>>,
+    hasher: web::Data<Password>,
 ) -> impl Responder {
-    let user: User = user.into_inner().into();
+    let hasher: &Password = hasher.as_ref();
+    let user: User = (user.into_inner(), hasher).into();
     match collection.insert_one(&user).await {
         Ok(_) => HttpResponse::Ok().json(user),
         Err(_) => HttpResponse::Conflict().json(MyError {
@@ -83,20 +93,30 @@ async fn delete_user_by_email(
 }
 
 async fn delete_user_by_id(
-    user: web::Path<String>,
+    id: web::Path<String>,
     collection: web::Data<Collection<User>>,
 ) -> impl Responder {
-    HttpResponse::Ok().body(format!("Delete Id: {:?}", user))
+    let object_id = match ObjectId::parse_str(id.into_inner()) {
+        Ok(oid) => oid,
+        Err(_) => return HttpResponse::BadRequest().body("Invalid ID format"),
+    };
+    match collection.delete_one(doc! { "_id": object_id }).await {
+        Ok(v) if v.deleted_count > 0 => HttpResponse::Ok().finish(),
+        Ok(_) => HttpResponse::NotFound().finish(),
+        Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
+    }
 }
 async fn update_user_by_email(
-    user: web::Path<String>,
+    email: web::Path<String>,
     collection: web::Data<Collection<User>>,
+    hasher: web::Data<Password>,
 ) -> impl Responder {
-    HttpResponse::Ok().body(format!("Update Email: {:?}", user))
+    HttpResponse::Ok().body(format!("Update Email: {:?}", email))
 }
 async fn update_user_by_id(
     user: web::Path<String>,
     collection: web::Data<Collection<User>>,
+    // hasher: web::Data<Password>,
 ) -> impl Responder {
     HttpResponse::Ok().body(format!("Update Id: {:?}", user))
 }
